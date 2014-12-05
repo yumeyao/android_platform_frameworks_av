@@ -37,26 +37,6 @@ StagefrightMediaScanner::StagefrightMediaScanner() {}
 
 StagefrightMediaScanner::~StagefrightMediaScanner() {}
 
-static bool FileHasAcceptableExtension(const char *extension) {
-    static const char *kValidExtensions[] = {
-        ".mp3", ".mp4", ".m4a", ".3gp", ".3gpp", ".3g2", ".3gpp2",
-        ".mpeg", ".ogg", ".mid", ".smf", ".imy", ".wma", ".aac",
-        ".wav", ".amr", ".midi", ".xmf", ".rtttl", ".rtx", ".ota",
-        ".mkv", ".mka", ".webm", ".ts", ".fl", ".flac", ".mxmf",
-        ".avi", ".mpeg", ".mpg", ".awb", ".mpga"
-    };
-    static const size_t kNumValidExtensions =
-        sizeof(kValidExtensions) / sizeof(kValidExtensions[0]);
-
-    for (size_t i = 0; i < kNumValidExtensions; ++i) {
-        if (!strcasecmp(extension, kValidExtensions[i])) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static MediaScanResult HandleMIDI(
         const char *filename, MediaScannerClient *client) {
     // get the library configuration and do sanity check
@@ -117,28 +97,112 @@ MediaScanResult StagefrightMediaScanner::processFile(
     return result;
 }
 
+/*
+ * Return 0 for MIDI
+ * Return 1 for other valid types
+ * Return -1 for non-valid
+ */
+static inline int FileHasAcceptableExtension(const char *extension, int len) {
+    static const char kValidExtensions[] =
+        //2 bytes - only non-MIDI
+        "fl" "ts" //please fill to make it multiple of 4
+        //3 bytes
+        //MIDI types go first
+        "ota rtx xmf imy smf mid "
+        //Non-MIDI types without numeric go next
+        "awb mpg avi mka mkv amr wav aac wma ogg "
+        //Non-MIDI types with numeric go last
+        //A mask is used to mask alpha to lowercase
+        "\0 \0 3g2 "   "\0   3gp "   " \0  m4a "   "  \0 mp4 "   "  \0 mp3 "
+        //4 bytes
+        //MIDI types go first
+        "midi" "mxmf"
+        //Non-MIDI types go last
+        "mpga" "webm" "mpeg" "flac"
+        //5 bytes - 3gpp2 can share with 3gpp.
+        //Non-MIDI
+        "\0   3gpp2\0\0\0"
+        //MIDI
+        "rtttl\0\0\0";
+    static const int num2 = 2;
+    static const size_t size2 = (num2+1) * sizeof(int16_t) / sizeof(int32_t);
+    static const int num3MIDI = 6;
+    static const int num3NonMIDIA = 10; //Alpha
+    static const int num3NonMIDIN = 5;  //Numeric
+    static const size_t size3 = num3MIDI + num3NonMIDIA + 2 * num3NonMIDIN;
+    static const int num4MIDI = 2;
+    static const int num4NonMIDIA = 4;  //Alpha
+    static const int num4NonMIDIN = 1;  //Numeric
+    static const size_t size4 = num4MIDI + num4NonMIDIA + 2 * num4NonMIDIN;
+
+    if (len < 2 || len > 5) return -1;
+
+    const char *cbase = kValidExtensions;
+    int count;
+    if (unlikely(len==2)) {
+        const int16_t *base = reinterpret_cast<const int16_t*>(cbase);
+        int16_t extexpr = *(reinterpret_cast<const int16_t*>(extension));
+        extexpr |= 0x2020;
+        for (count=num2-1; count>=0; --count) {
+            if (extexpr==base[count]) return 1;
+        }
+        return -1;
+    }
+    const int32_t *base = reinterpret_cast<const int32_t*>(cbase);
+    int32_t extexpr = *(reinterpret_cast<const int32_t*>(extension));
+    if (unlikely(len==5)) {
+        base += (size2 + size3 + size4) - 1*2; //3gpp2 & 3gpp to minus 2
+        if ((extexpr | base[0]) == base[1] && extension[4] == '2') return 1;
+        if ((extexpr | 0x20202020) == base[3]
+            && (extension[4] | 0x20) == 'l') return 0;
+        return -1;
+    }
+
+    //Now len==3 || len==4
+    //Non-MIDI with numeric
+    base = len == 3 ? base + size2 + size3 - num3NonMIDIN *2
+                    : base + size2 + size3 + size4 - num4NonMIDIN *2;
+    count = len == 3 ? (num3NonMIDIN - 1)*2 : (num4NonMIDIN - 1)*2;
+    for (; count>=0; count-=2) {
+        if ((extexpr | base[count]) == base[count+1]) return 1;
+    }
+
+    //Non-MIDI without numeric
+    count = len == 3 ? num3NonMIDIA : num4NonMIDIA;
+    extexpr |= 0x20202020;
+    base -= count;
+    --count;
+    for (; count>=0; --count) {
+        if (extexpr == base[count]) return 1;
+    }
+
+    //MIDI
+    count = len == 3 ? num3MIDI : num4MIDI;
+    base -= count;
+    --count;
+    for (; count>=0; --count) {
+        if (extexpr == base[count]) return 0;
+    }
+    return -1;
+}
+
 MediaScanResult StagefrightMediaScanner::processFileInternal(
         const char *path, const char * /* mimeType */,
         MediaScannerClient &client) {
-    const char *extension = strrchr(path, '.');
+    int length = strlen(path);
+    int extoffset = length;
+    while (extoffset >= 0 && path[extoffset]!='.') --extoffset;
 
-    if (!extension) {
+    if (extoffset < 0) {
         return MEDIA_SCAN_RESULT_SKIPPED;
     }
 
-    if (!FileHasAcceptableExtension(extension)) {
+    ++extoffset; // No need to compare the '.'
+    const char *extension = path+extoffset;
+    int filetype = FileHasAcceptableExtension(extension, length - extoffset);
+    if (filetype < 0) {
         return MEDIA_SCAN_RESULT_SKIPPED;
-    }
-
-    if (!strcasecmp(extension, ".mid")
-            || !strcasecmp(extension, ".smf")
-            || !strcasecmp(extension, ".imy")
-            || !strcasecmp(extension, ".midi")
-            || !strcasecmp(extension, ".xmf")
-            || !strcasecmp(extension, ".rtttl")
-            || !strcasecmp(extension, ".rtx")
-            || !strcasecmp(extension, ".ota")
-            || !strcasecmp(extension, ".mxmf")) {
+    } else if (filetype == 0) {
         return HandleMIDI(path, &client);
     }
 
