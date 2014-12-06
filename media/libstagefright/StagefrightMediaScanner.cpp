@@ -97,6 +97,7 @@ MediaScanResult StagefrightMediaScanner::processFile(
     return result;
 }
 
+static const int MAX_EXT_LEN = 5;
 /*
  * Return 0 for MIDI
  * Return 1 for other valid types
@@ -135,7 +136,7 @@ static inline int FileHasAcceptableExtension(const char *extension, int len) {
     static const int num4NonMIDIN = 1;  //Numeric
     static const size_t size4 = num4MIDI + num4NonMIDIA + 2 * num4NonMIDIN;
 
-    if (len < 2 || len > 5) return -1;
+    if (len < 2 /*|| len > 5*/) return -1; //len > 5 won't be passed in.
 
     const char *cbase = kValidExtensions;
     int count;
@@ -190,16 +191,18 @@ MediaScanResult StagefrightMediaScanner::processFileInternal(
         const char *path, const char * /* mimeType */,
         MediaScannerClient &client) {
     int length = strlen(path);
-    int extoffset = length;
-    while (extoffset >= 0 && path[extoffset]!='.') --extoffset;
+    int lentoscan = length < (MAX_EXT_LEN + 1) ? length : (MAX_EXT_LEN + 1);
+    const char *extension = path+length-lentoscan;
+    int extoffset = lentoscan;
+    while (--extoffset >= 0 && extension[extoffset]!='.');
 
     if (extoffset < 0) {
         return MEDIA_SCAN_RESULT_SKIPPED;
     }
 
     ++extoffset; // No need to compare the '.'
-    const char *extension = path+extoffset;
-    int filetype = FileHasAcceptableExtension(extension, length - extoffset);
+    extension += extoffset;
+    int filetype = FileHasAcceptableExtension(extension, lentoscan-extoffset);
     if (filetype < 0) {
         return MEDIA_SCAN_RESULT_SKIPPED;
     } else if (filetype == 0) {
